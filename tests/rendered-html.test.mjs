@@ -35,6 +35,9 @@ test("publishes branded social metadata", async () => {
   const response = await render();
   const html = await response.text();
   assert.match(html, /property="og:title" content="CostFloor"/i);
-  assert.match(html, /property="og:image" content="http:\/\/localhost:3000\/og\.png"/i);
+  assert.match(
+    html,
+    /property="og:image" content="https:\/\/costfloor-agi-house\.alezarzu\.chatgpt\.site\/og\.png"/i,
+  );
   assert.match(html, /name="twitter:card" content="summary_large_image"/i);
 });

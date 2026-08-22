@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL(process.env.SITE_ORIGIN ?? "http://localhost:3000"),
+  metadataBase: new URL("https://costfloor-agi-house.alezarzu.chatgpt.site"),
   title: {
     default: "CostFloor — See what remains when work is automated",
     template: "%s · CostFloor",

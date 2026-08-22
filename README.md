@@ -2,6 +2,8 @@
 
 CostFloor is an auditable scenario engine for estimating an **automation-adjusted resource floor at today's energy price**. It traces a product's current price through labor, capital, direct energy, materials, land/scarcity, tax, and margin; labor and capital are then replaced recursively with explicit physical inputs.
 
+[Open the deployed demo](https://costfloor-agi-house.alezarzu.chatgpt.site)
+
 The output is a technological boundary scenario, not a forecast of what a seller will charge. Demand, scarcity, taxes, regulation, financing, and market power can keep prices above production cost.
 
 ## Hackathon MVP
