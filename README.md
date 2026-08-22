@@ -4,6 +4,8 @@ CostFloor is an auditable scenario engine for estimating an **automation-adjuste
 
 [Open the deployed demo](https://costfloor-agi-house.alezarzu.chatgpt.site)
 
+[Download the 14-slide technical presentation](presentation/CostFloor_Hackathon_Pitch_Technical.pptx)
+
 The output is a technological boundary scenario, not a forecast of what a seller will charge. Demand, scarcity, taxes, regulation, financing, and market power can keep prices above production cost.
 
 ## Hackathon MVP
