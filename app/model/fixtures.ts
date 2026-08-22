@@ -1,12 +1,113 @@
 import type {
   CostNode,
   Evidence,
+  Factor,
+  PhysicalDepthFallback,
   ProductModel,
   Range,
   ReplacementNode,
 } from "./types";
 
 const r = (low: number, base: number, high: number): Range => ({ low, base, high });
+const zero = (): Range => r(0, 0, 0);
+const add = (a: Range, b: Range): Range =>
+  r(a.low + b.low, a.base + b.base, a.high + b.high);
+
+const energyFallback = (kWh: Range, scaleWithRobot: boolean): PhysicalDepthFallback => ({
+  energy: [{ kWh, scaleWithRobot }],
+  scarcityUsd: zero(),
+  fixedUsd: zero(),
+});
+
+const scarcityFallback = (usd: Range): PhysicalDepthFallback => ({
+  energy: [],
+  scarcityUsd: usd,
+  fixedUsd: zero(),
+});
+
+const fixedFallback = (usd: Range): PhysicalDepthFallback => ({
+  energy: [],
+  scarcityUsd: zero(),
+  fixedUsd: usd,
+});
+
+const mergeFallbacks = (...fallbacks: PhysicalDepthFallback[]): PhysicalDepthFallback =>
+  fallbacks.reduce<PhysicalDepthFallback>(
+    (total, fallback) => ({
+      energy: [...total.energy, ...fallback.energy],
+      scarcityUsd: add(total.scarcityUsd, fallback.scarcityUsd),
+      fixedUsd: add(total.fixedUsd, fallback.fixedUsd),
+    }),
+    { energy: [], scarcityUsd: zero(), fixedUsd: zero() },
+  );
+
+const replacementEnergy = (
+  id: string,
+  label: string,
+  note: string,
+  evidenceIds: string[],
+  kWh: Range,
+  scaleWithRobot: boolean,
+): ReplacementNode => ({
+  id,
+  label,
+  factor: "energy",
+  note,
+  evidenceIds,
+  depthFallback: energyFallback(kWh, scaleWithRobot),
+  rule: { kind: "energy", kWh, scaleWithRobot },
+});
+
+const replacementScarcity = (
+  id: string,
+  label: string,
+  factor: Factor,
+  note: string,
+  evidenceIds: string[],
+  usd: Range,
+): ReplacementNode => ({
+  id,
+  label,
+  factor,
+  note,
+  evidenceIds,
+  depthFallback: scarcityFallback(usd),
+  rule: { kind: "scarcity", usd },
+});
+
+const replacementFixed = (
+  id: string,
+  label: string,
+  factor: Factor,
+  note: string,
+  evidenceIds: string[],
+  usd: Range,
+): ReplacementNode => ({
+  id,
+  label,
+  factor,
+  note,
+  evidenceIds,
+  depthFallback: fixedFallback(usd),
+  rule: { kind: "fixed", usd },
+});
+
+const replacementGroup = (
+  id: string,
+  label: string,
+  factor: Factor,
+  note: string,
+  evidenceIds: string[],
+  children: ReplacementNode[],
+): ReplacementNode => ({
+  id,
+  label,
+  factor,
+  note,
+  evidenceIds,
+  depthFallback: mergeFallbacks(...children.map((child) => child.depthFallback)),
+  rule: { kind: "recurse", children },
+});
 
 const commonEvidence: Evidence[] = [
   {
@@ -78,136 +179,176 @@ const laborReplacement = (
   materialUsd: Range,
   fabricationKWh: Range,
   maintenanceKWh: Range,
-): ReplacementNode => ({
-  id: `${id}-replacement`,
-  label: "Equivalent automated task",
-  factor: "capital",
-  note: "The human task is replaced by operating electricity and a per-unit share of machine capital.",
-  evidenceIds: ["robot-envelope", "bounded-recursion"],
-  fallbackUsd: r(0.04, 0.14, 0.4),
-  rule: {
-    kind: "recurse",
-    children: [
-      {
-        id: `${id}-operating-energy`,
-        label: "Robot operating electricity",
-        factor: "energy",
-        note: "Task energy after converting human task time into equivalent machine runtime.",
-        evidenceIds: ["robot-envelope", "ca-electricity"],
-        fallbackUsd: r(0.01, 0.04, 0.12),
-        rule: { kind: "energy", kWh: operatingKWh },
-      },
-      {
-        id: `${id}-capital`,
-        label: "Robot capital allocation",
-        factor: "capital",
-        note: "A per-product share of the machine's embodied inputs, lifetime, and utilization.",
-        evidenceIds: ["robot-envelope", "bounded-recursion"],
-        fallbackUsd: r(0.04, 0.12, 0.32),
-        rule: {
-          kind: "recurse",
-          children: [
-            {
-              id: `${id}-capital-materials`,
-              label: "Embodied materials & scarce inputs",
-              factor: "material",
-              note: "Metals, electronics, and other terminal material residuals allocated to one product unit.",
-              evidenceIds: ["robot-envelope"],
-              fallbackUsd: materialUsd,
-              rule: { kind: "scarcity", usd: materialUsd },
-            },
-            {
-              id: `${id}-capital-energy`,
-              label: "Fabrication energy",
-              factor: "energy",
-              note: "Allocated energy required to fabricate the automation equipment.",
-              evidenceIds: ["robot-envelope", "ca-electricity"],
-              fallbackUsd: r(0.01, 0.04, 0.12),
-              rule: { kind: "energy", kWh: fabricationKWh },
-            },
-            {
-              id: `${id}-maintenance`,
-              label: "Automated maintenance",
-              factor: "capital",
-              note: "A fourth-level expansion for service energy and tooling wear.",
-              evidenceIds: ["robot-envelope", "bounded-recursion"],
-              fallbackUsd: r(0.01, 0.05, 0.14),
-              rule: {
-                kind: "recurse",
-                children: [
-                  {
-                    id: `${id}-maintenance-energy`,
-                    label: "Maintenance electricity",
-                    factor: "energy",
-                    note: "Diagnostics, movement, cleaning, and servicing energy allocated per unit.",
-                    evidenceIds: ["robot-envelope", "ca-electricity"],
-                    fallbackUsd: r(0.005, 0.02, 0.07),
-                    rule: { kind: "energy", kWh: maintenanceKWh },
-                  },
-                  {
-                    id: `${id}-tooling`,
-                    label: "Tooling wear",
-                    factor: "material",
-                    note: "Consumable physical wear that does not vanish with labor automation.",
-                    evidenceIds: ["robot-envelope"],
-                    fallbackUsd: r(0.005, 0.02, 0.06),
-                    rule: { kind: "fixed", usd: r(0.005, 0.02, 0.06) },
-                  },
-                ],
-              },
-            },
-          ],
-        },
-      },
-    ],
-  },
-});
+): ReplacementNode => {
+  const operatingEnergy = replacementEnergy(
+    `${id}-operating-energy`,
+    "Robot operating electricity",
+    "Task energy after converting human task time into equivalent machine runtime.",
+    ["robot-envelope", "ca-electricity"],
+    operatingKWh,
+    true,
+  );
+  const materials = replacementScarcity(
+    `${id}-capital-materials`,
+    "Embodied materials & scarce inputs",
+    "material",
+    "Metals, electronics, and other terminal material residuals allocated to one product unit.",
+    ["robot-envelope"],
+    materialUsd,
+  );
+  const fabrication = replacementEnergy(
+    `${id}-capital-energy`,
+    "Fabrication energy",
+    "Allocated energy required to fabricate the automation equipment.",
+    ["robot-envelope", "ca-electricity"],
+    fabricationKWh,
+    false,
+  );
+  const maintenanceEnergy = replacementEnergy(
+    `${id}-maintenance-energy`,
+    "Maintenance electricity",
+    "Diagnostics, movement, cleaning, and servicing energy allocated per unit.",
+    ["robot-envelope", "ca-electricity"],
+    maintenanceKWh,
+    false,
+  );
+  const tooling = replacementFixed(
+    `${id}-tooling`,
+    "Tooling wear",
+    "material",
+    "Consumable physical wear that does not vanish with labor automation.",
+    ["robot-envelope"],
+    r(0.005, 0.02, 0.06),
+  );
+  const maintenance = replacementGroup(
+    `${id}-maintenance`,
+    "Automated maintenance",
+    "capital",
+    "A fourth-level expansion for service energy and tooling wear.",
+    ["robot-envelope", "bounded-recursion"],
+    [maintenanceEnergy, tooling],
+  );
+  const capital = replacementGroup(
+    `${id}-capital`,
+    "Robot capital allocation",
+    "capital",
+    "A per-product share of the machine's embodied inputs, lifetime, and utilization.",
+    ["robot-envelope", "bounded-recursion"],
+    [materials, fabrication, maintenance],
+  );
+  return replacementGroup(
+    `${id}-replacement`,
+    "Equivalent automated task",
+    "capital",
+    "The human task is replaced by operating electricity and a per-unit share of machine capital.",
+    ["robot-envelope", "bounded-recursion"],
+    [operatingEnergy, capital],
+  );
+};
 
 const capitalReplacement = (
   id: string,
   materialUsd: Range,
   fabricationKWh: Range,
   serviceKWh: Range,
-): ReplacementNode => ({
-  id: `${id}-replacement`,
-  label: "Expanded productive asset",
-  factor: "capital",
-  note: "The asset's sticker cost is replaced with allocated materials, fabrication energy, and automated upkeep.",
-  evidenceIds: ["bounded-recursion", "robot-envelope"],
-  fallbackUsd: r(0.08, 0.28, 0.8),
-  rule: {
-    kind: "recurse",
-    children: [
-      {
-        id: `${id}-materials`,
-        label: "Asset materials",
-        factor: "material",
-        note: "Allocated physical materials and scarce inputs per product unit.",
-        evidenceIds: ["robot-envelope"],
-        fallbackUsd: materialUsd,
-        rule: { kind: "scarcity", usd: materialUsd },
-      },
-      {
-        id: `${id}-fabrication`,
-        label: "Asset fabrication energy",
-        factor: "energy",
-        note: "Embodied manufacturing energy allocated across useful output.",
-        evidenceIds: ["robot-envelope", "ca-electricity"],
-        fallbackUsd: r(0.02, 0.08, 0.25),
-        rule: { kind: "energy", kWh: fabricationKWh },
-      },
-      laborReplacement(`${id}-service`, serviceKWh, r(0.01, 0.04, 0.11), r(0.03, 0.1, 0.3), r(0.01, 0.04, 0.12)),
-    ],
-  },
-});
+): ReplacementNode => {
+  const materials = replacementScarcity(
+    `${id}-materials`,
+    "Asset materials",
+    "material",
+    "Allocated physical materials and scarce inputs per product unit.",
+    ["robot-envelope"],
+    materialUsd,
+  );
+  const fabrication = replacementEnergy(
+    `${id}-fabrication`,
+    "Asset fabrication energy",
+    "Embodied manufacturing energy allocated across useful output.",
+    ["robot-envelope", "ca-electricity"],
+    fabricationKWh,
+    false,
+  );
+  const service = laborReplacement(
+    `${id}-service`,
+    serviceKWh,
+    r(0.01, 0.04, 0.11),
+    r(0.03, 0.1, 0.3),
+    r(0.01, 0.04, 0.12),
+  );
+  return replacementGroup(
+    `${id}-replacement`,
+    "Expanded productive asset",
+    "capital",
+    "The asset's sticker cost is replaced with allocated materials, fabrication energy, and automated upkeep.",
+    ["bounded-recursion", "robot-envelope"],
+    [materials, fabrication, service],
+  );
+};
 
-const root = (id: string, name: string, price: number, children: CostNode[]): CostNode => ({
+const terminalReplacement = (
+  id: string,
+  label: string,
+  robotKWh: Range,
+  embodiedKWh: Range,
+  scarcityUsd: Range,
+  fixedUsd: Range,
+  evidenceIds: string[],
+): ReplacementNode => {
+  const robotEnergy = replacementEnergy(
+    `${id}-task-energy`,
+    `${label} task energy`,
+    "Operating energy that responds to the robot task-energy scenario control.",
+    evidenceIds,
+    robotKWh,
+    true,
+  );
+  const embodiedEnergy = replacementEnergy(
+    `${id}-embodied-energy`,
+    `${label} embodied energy`,
+    "Allocated fabrication and upkeep energy; it does not scale with robot task runtime.",
+    evidenceIds,
+    embodiedKWh,
+    false,
+  );
+  const scarcity = replacementScarcity(
+    `${id}-scarcity`,
+    `${label} scarce inputs`,
+    "material",
+    "Natural-resource and material scarcity only; supplier purchase prices are not inserted here.",
+    evidenceIds,
+    scarcityUsd,
+  );
+  const fixed = replacementFixed(
+    `${id}-fixed`,
+    `${label} physical wear`,
+    "capital",
+    "Non-energy consumables and tooling wear allocated to one functional unit.",
+    evidenceIds,
+    fixedUsd,
+  );
+  return replacementGroup(
+    `${id}-replacement`,
+    label,
+    "capital",
+    "A shallow terminal expansion keeps the physical accounting visible without arbitrary dollar fallbacks.",
+    evidenceIds,
+    [robotEnergy, embodiedEnergy, scarcity, fixed],
+  );
+};
+
+const root = (
+  id: string,
+  name: string,
+  price: number,
+  children: CostNode[],
+  evidenceIds: string[] = ["price-input"],
+): CostNode => ({
   id,
   label: name,
   factor: "unknown",
   currentCost: price,
   note: "One functional unit, normalized to the editable current retail price.",
-  evidenceIds: ["price-input"],
+  evidenceIds,
   rule: { kind: "recurse" },
   children,
 });
@@ -266,6 +407,154 @@ const flourEvidence: Evidence[] = [
     title: "Two-pound flour bag decomposition",
     publisher: "CostFloor demo model",
     note: "The branch totals reconcile to $4.49 and make the already-mechanized baseline inspectable.",
+  },
+];
+
+const waterEvidence: Evidence[] = [
+  ...commonEvidence,
+  {
+    id: "water-thermodynamics",
+    kind: "observed",
+    title: "Thermodynamic Properties of Water (NISTIR 5078)",
+    publisher: "National Institute of Standards and Technology",
+    url: "https://www.nist.gov/srd/nistir-5078",
+    note:
+      "The useful heat is derived as 1 kg × 4.186 kJ/kg-K × 79 K = 330.7 kJ, or 0.09186 kWh, before kettle losses.",
+  },
+  {
+    id: "water-system-energy",
+    kind: "observed",
+    title: "Strategies for Saving Energy at Public Water Systems",
+    publisher: "U.S. Environmental Protection Agency",
+    url: "https://www.epa.gov/sites/default/files/2015-04/documents/epa816f13004.pdf",
+    note:
+      "EPA's typical surface-water system uses 1,500 kWh per million gallons, equivalent to about 0.000396 kWh/L.",
+  },
+  {
+    id: "california-water-energy",
+    kind: "observed",
+    title: "California embedded electricity in water methodology",
+    publisher: "California Energy Commission / California Public Utilities Commission",
+    url: "https://efiling.energy.ca.gov/GetDocument.aspx?DocumentContentId=27774&tn=222230",
+    note:
+      "California estimates vary by hydrologic region; the statewide indoor estimate is 4,848 kWh per million gallons and the South Coast estimate is 7,227.",
+  },
+  {
+    id: "kettle-life",
+    kind: "assumption",
+    title: "10,000-use electric-kettle life",
+    publisher: "User-supplied scenario assumption",
+    note:
+      "The fixture allocates a $30 kettle and its embodied inputs across 10,000 one-liter heating cycles. This is not an observed reliability claim.",
+  },
+  {
+    id: "water-split",
+    kind: "assumption",
+    title: "One-liter boiled-water engineering envelope",
+    publisher: "CostFloor demo model",
+    note:
+      "Kettle efficiency is modeled at roughly 90/85/75 percent. Tap-water scarcity and kettle embodied inputs are deliberately broad scenario envelopes.",
+  },
+];
+
+const laptopEvidence: Evidence[] = [
+  ...commonEvidence,
+  {
+    id: "laptop-price",
+    kind: "observed",
+    title: "Apple introduces MacBook Air with M5",
+    publisher: "Apple",
+    url: "https://www.apple.com/newsroom/2026/03/apple-introduces-the-new-macbook-air-with-m5/",
+    note: "The 13-inch MacBook Air with M5 starts at $1,099 in the United States before sales tax.",
+  },
+  {
+    id: "laptop-mass",
+    kind: "observed",
+    title: "MacBook Air (13-inch, M5) technical specifications",
+    publisher: "Apple",
+    url: "https://support.apple.com/en-us/126320",
+    note: "Apple reports a product mass of 1.23 kg for the reference 13-inch configuration.",
+  },
+  {
+    id: "laptop-production-energy",
+    kind: "observed",
+    title: "Life Cycle Assessment Data for Computer Products and Mobile Phones",
+    publisher: "U.S. Environmental Protection Agency",
+    url: "https://www.epa.gov/sites/production/files/2018-02/documents/lca_computer_-_phones.pdf",
+    note:
+      "EPA reports 232.58 kWh/kg for notebook production using a 2015 SimaPro model. At 1.23 kg, about 286 kWh is a cross-check envelope, not an additional branch.",
+  },
+  {
+    id: "laptop-environment",
+    kind: "observed",
+    title: "MacBook Air (M5) Product Environmental Report",
+    publisher: "Apple",
+    url: "https://www.apple.com/environment/pdf/products/notebooks/MacBook_Air_M5_PER_Mar2026.pdf",
+    note:
+      "Apple reports a 119 kg CO2e footprint for the base 13-inch configuration. Carbon is used only as a boundary cross-check and is never converted to kWh.",
+  },
+  {
+    id: "laptop-split",
+    kind: "assumption",
+    title: "Consumer-laptop cost and energy allocation",
+    publisher: "CostFloor demo model",
+    note:
+      "Current-price branches reconcile to $1,099 but are not an audited Apple bill of materials. The EPA whole-product energy anchor is allocated rather than added twice.",
+  },
+];
+
+const carEvidence: Evidence[] = [
+  ...commonEvidence,
+  {
+    id: "car-price",
+    kind: "observed",
+    title: "2026 Toyota Corolla",
+    publisher: "Toyota",
+    url: "https://www.toyota.com/corolla/2026/",
+    note: "Toyota lists a $23,125 starting MSRP for the 2026 Corolla before sales tax.",
+  },
+  {
+    id: "car-mass",
+    kind: "observed",
+    title: "2026 Corolla LE specifications",
+    publisher: "Toyota",
+    url: "https://www.toyota.com/corolla/corolla-vs-civic/",
+    note: "Toyota reports a 2,955 lb curb weight for the 2026 Corolla LE.",
+  },
+  {
+    id: "car-material-composition",
+    kind: "observed",
+    title: "Quadrennial Technology Review: Concepts in Integrated Analysis",
+    publisher: "U.S. Department of Energy",
+    url: "https://www.energy.gov/sites/prod/files/2015/09/f26/QTR2015-10-Integrated-Analysis.pdf",
+    note:
+      "DOE's representative 2,900 lb conventional passenger car includes 1,900 lb steel, 310 lb cast iron, 193 lb aluminum, 320 lb plastic, and 300 lb rubber.",
+  },
+  {
+    id: "car-material-energy",
+    kind: "observed",
+    title: "Sustainable Materials Selection in Manufactured Products",
+    publisher: "U.S. Department of Energy",
+    url: "https://www.energy.gov/sites/default/files/2023-09/Materials%20Substitution%20Working%20Report_August%202023_final_compliant_v2_0.pdf",
+    note:
+      "DOE reports 41.7/7.9 MJ/kg for primary/secondary steel and 136.5/13.6 MJ/kg for primary/secondary aluminum, illustrating the recycled-content sensitivity.",
+  },
+  {
+    id: "greet-vehicle-cycle",
+    kind: "observed",
+    title: "Vehicle Production Pathways in GREET",
+    publisher: "Argonne National Laboratory",
+    url: "https://publications.anl.gov/anlpubs/2022/07/176270.pdf",
+    note:
+      "GREET defines the vehicle cycle from raw-material extraction through material processing, component manufacture, assembly, and end of life.",
+  },
+  {
+    id: "car-split",
+    kind: "assumption",
+    title: "Representative passenger-car cost and energy allocation",
+    publisher: "CostFloor demo model",
+    note:
+      "The 13.17–53.50 MWh-eq production envelope is a CostFloor synthesis, not a published Corolla-specific GREET result. Current-price branches are not an audited Toyota cost statement.",
   },
 ];
 
@@ -549,16 +838,354 @@ export const PRODUCTS: ProductModel[] = [
       },
     ]),
   },
+  {
+    id: "boiled-water",
+    name: "Tap water heated to boiling",
+    shortName: "Boiled water",
+    unit: "1 L, heated once from 21°C to 100°C",
+    region: "California household",
+    currentPrice: 0.0266,
+    aliases: ["boiled water", "hot water", "kettle water", "one liter boiled water"],
+    description:
+      "A physics-anchored validation case: nearly all of the functional-unit cost is the heat required to raise one liter of water by 79°C.",
+    evidence: waterEvidence,
+    root: root(
+      "boiled-water-root",
+      "Tap water heated to boiling",
+      0.0266,
+      [
+        {
+          id: "water-heat",
+          label: "Kettle heating electricity",
+          factor: "energy",
+          currentCost: 0.0216,
+          note:
+            "Useful heat is 0.09186 kWh; the input envelope represents roughly 90, 85, and 75 percent kettle efficiency.",
+          evidenceIds: ["water-thermodynamics", "water-split", "ca-electricity"],
+          rule: { kind: "energy", kWh: r(0.102, 0.108, 0.123) },
+        },
+        {
+          id: "water-supply",
+          label: "Tap-water supply and scarcity",
+          factor: "land",
+          currentCost: 0.002,
+          note:
+            "Utility-system energy is separated from a small optional water-scarcity residual.",
+          evidenceIds: ["water-system-energy", "california-water-energy", "water-split"],
+          rule: {
+            kind: "resource",
+            processKWh: r(0.0004, 0.0015, 0.005),
+            scarcityUsd: r(0.0005, 0.002, 0.006),
+          },
+        },
+        {
+          id: "water-kettle-capital",
+          label: "Electric-kettle capital allocation",
+          factor: "capital",
+          currentCost: 0.003,
+          note:
+            "The current allocation is a $30 kettle divided by the user-supplied 10,000-use life; replacement removes that sticker allocation before adding physical inputs.",
+          evidenceIds: ["kettle-life", "water-split", "bounded-recursion"],
+          rule: {
+            kind: "replace",
+            replacement: terminalReplacement(
+              "water-kettle",
+              "Kettle embodied allocation",
+              zero(),
+              r(0.00152, 0.0031, 0.0085),
+              r(0.00005, 0.0002, 0.0008),
+              r(0.00002, 0.0001, 0.0005),
+              ["kettle-life", "water-split", "ca-electricity"],
+            ),
+          },
+        },
+      ],
+      ["water-split", "kettle-life"],
+    ),
+  },
+  {
+    id: "consumer-laptop",
+    name: "13-inch MacBook Air (M5 class)",
+    shortName: "Consumer laptop",
+    unit: "one 13-inch laptop, purchase boundary",
+    region: "United States retail / California scenario",
+    currentPrice: 1_099,
+    aliases: [
+      "laptop",
+      "consumer laptop",
+      "macbook air",
+      "13 inch laptop",
+      "m5 macbook air",
+    ],
+    description:
+      "A semiconductor-intensive purchase good whose manufacturing energy and scarce materials persist while labor, software, and tooling allocations compress.",
+    evidence: laptopEvidence,
+    root: root(
+      "consumer-laptop-root",
+      "13-inch MacBook Air (M5 class)",
+      1_099,
+      [
+        {
+          id: "laptop-margin",
+          label: "Brand, retail and channel margin",
+          factor: "margin",
+          currentCost: 300,
+          note: "A transparent demo allocation excluded from the physical production floor by default.",
+          evidenceIds: ["laptop-price", "laptop-split"],
+          rule: { kind: "exclude" },
+        },
+        {
+          id: "laptop-components",
+          label: "Components and material processing",
+          factor: "material",
+          currentCost: 360,
+          note:
+            "Semiconductors, display, battery, enclosure, boards, and upstream processing. The EPA whole-product energy anchor is allocated across this and other physical branches, not added again.",
+          evidenceIds: ["laptop-production-energy", "laptop-environment", "laptop-split"],
+          rule: {
+            kind: "resource",
+            processKWh: r(150, 235, 450),
+            scarcityUsd: r(6, 20, 70),
+          },
+        },
+        {
+          id: "laptop-assembly",
+          label: "Final assembly and test labor",
+          factor: "labor",
+          currentCost: 70,
+          note: "Current labor is replaced with task electricity and an allocated share of automation equipment.",
+          evidenceIds: ["laptop-split", "robot-envelope", "bounded-recursion"],
+          rule: {
+            kind: "replace",
+            replacement: terminalReplacement(
+              "laptop-assembly",
+              "Automated assembly and test",
+              r(0.5, 2, 8),
+              r(1.5, 6, 25),
+              r(0.2, 1, 5),
+              r(0.02, 0.1, 0.5),
+              ["laptop-split", "robot-envelope", "bounded-recursion"],
+            ),
+          },
+        },
+        {
+          id: "laptop-engineering",
+          label: "Engineering, software and support labor",
+          factor: "labor",
+          currentCost: 230,
+          note:
+            "Per-device allocation of pre-sale design, software, administration, and support work; lifetime device charging remains outside this purchase boundary.",
+          evidenceIds: ["laptop-split", "bounded-recursion"],
+          rule: {
+            kind: "replace",
+            replacement: terminalReplacement(
+              "laptop-engineering",
+              "Automated engineering and support",
+              r(3, 12, 60),
+              r(2, 8, 35),
+              r(0.1, 0.5, 4),
+              r(0.1, 0.5, 3),
+              ["laptop-split", "bounded-recursion", "ca-electricity"],
+            ),
+          },
+        },
+        {
+          id: "laptop-factory",
+          label: "Factory and tooling capital",
+          factor: "capital",
+          currentCost: 80,
+          note: "The productive asset is replaced by allocated fabrication, upkeep, scarce inputs, and tooling wear.",
+          evidenceIds: ["laptop-split", "bounded-recursion"],
+          rule: {
+            kind: "replace",
+            replacement: terminalReplacement(
+              "laptop-factory",
+              "Factory and tooling allocation",
+              zero(),
+              r(6, 25, 80),
+              r(1, 5, 18),
+              r(0.2, 1, 5),
+              ["laptop-split", "bounded-recursion", "ca-electricity"],
+            ),
+          },
+        },
+        {
+          id: "laptop-logistics",
+          label: "Packaging, freight and distribution",
+          factor: "capital",
+          currentCost: 59,
+          note:
+            "A purchase-boundary allocation of packaging and inbound distribution; customer travel and use-phase charging are excluded.",
+          evidenceIds: ["laptop-environment", "laptop-split"],
+          rule: {
+            kind: "resource",
+            processKWh: r(10, 25, 75),
+            scarcityUsd: r(1, 4, 15),
+          },
+        },
+      ],
+      ["laptop-price", "laptop-split"],
+    ),
+  },
+  {
+    id: "passenger-car",
+    name: "2026 Toyota Corolla LE-class passenger car",
+    shortName: "Passenger car",
+    unit: "one new gasoline passenger car, purchase boundary",
+    region: "United States retail / California scenario",
+    currentPrice: 23_125,
+    aliases: [
+      "car",
+      "passenger car",
+      "consumer car",
+      "toyota corolla",
+      "corolla le",
+      "gasoline car",
+    ],
+    description:
+      "A material- and capital-intensive purchase good based on a compact gasoline passenger car; lifetime gasoline, repairs, and road use are outside the fixture boundary.",
+    evidence: carEvidence,
+    root: root(
+      "passenger-car-root",
+      "2026 Toyota Corolla LE-class passenger car",
+      23_125,
+      [
+        {
+          id: "car-margin",
+          label: "Sales, brand, channel and profit allocation",
+          factor: "margin",
+          currentCost: 5_500,
+          note: "A transparent reconciling assumption excluded from the physical production floor by default.",
+          evidenceIds: ["car-price", "car-split"],
+          rule: { kind: "exclude" },
+        },
+        {
+          id: "car-components",
+          label: "Vehicle materials and components",
+          factor: "material",
+          currentCost: 9_000,
+          note:
+            "Raw-material extraction, processing, and component manufacture. Any future whole-vehicle GREET result must replace this envelope rather than be added to it.",
+          evidenceIds: [
+            "car-mass",
+            "car-material-composition",
+            "car-material-energy",
+            "greet-vehicle-cycle",
+            "car-split",
+          ],
+          rule: {
+            kind: "resource",
+            processKWh: r(12_000, 22_000, 40_000),
+            scarcityUsd: r(250, 800, 2_500),
+          },
+        },
+        {
+          id: "car-assembly",
+          label: "Final assembly and test labor",
+          factor: "labor",
+          currentCost: 2_000,
+          note: "Dexterous and supervisory assembly work is replaced with task energy plus automation inputs.",
+          evidenceIds: ["car-split", "robot-envelope", "bounded-recursion"],
+          rule: {
+            kind: "replace",
+            replacement: terminalReplacement(
+              "car-assembly",
+              "Automated vehicle assembly",
+              r(50, 150, 500),
+              r(100, 300, 1_000),
+              r(20, 80, 300),
+              r(5, 20, 100),
+              ["car-split", "robot-envelope", "bounded-recursion"],
+            ),
+          },
+        },
+        {
+          id: "car-engineering",
+          label: "Engineering and administration labor",
+          factor: "labor",
+          currentCost: 2_500,
+          note: "Per-vehicle allocation of design, software, planning, quality, and administrative work.",
+          evidenceIds: ["car-split", "bounded-recursion"],
+          rule: {
+            kind: "replace",
+            replacement: terminalReplacement(
+              "car-engineering",
+              "Automated engineering and administration",
+              r(100, 500, 2_500),
+              r(20, 100, 500),
+              r(2, 10, 50),
+              zero(),
+              ["car-split", "bounded-recursion", "ca-electricity"],
+            ),
+          },
+        },
+        {
+          id: "car-factory",
+          label: "Plant and tooling capital",
+          factor: "capital",
+          currentCost: 2_500,
+          note: "Factory structures and tooling are expanded into allocated energy, scarce inputs, upkeep, and wear.",
+          evidenceIds: ["car-split", "bounded-recursion"],
+          rule: {
+            kind: "replace",
+            replacement: terminalReplacement(
+              "car-factory",
+              "Vehicle plant and tooling allocation",
+              zero(),
+              r(600, 1_900, 6_500),
+              r(100, 400, 1_500),
+              r(20, 100, 500),
+              ["car-split", "bounded-recursion", "greet-vehicle-cycle"],
+            ),
+          },
+        },
+        {
+          id: "car-logistics",
+          label: "Freight and distribution",
+          factor: "capital",
+          currentCost: 1_625,
+          note: "Inbound and finished-vehicle distribution inside the purchase boundary; lifetime fuel is excluded.",
+          evidenceIds: ["car-split", "greet-vehicle-cycle"],
+          rule: {
+            kind: "resource",
+            processKWh: r(300, 800, 2_500),
+            scarcityUsd: r(30, 100, 400),
+          },
+        },
+      ],
+      ["car-price", "car-split"],
+    ),
+  },
 ];
 
 export const DEFAULT_PRODUCT = PRODUCTS[0];
 
+const normalizeLookup = (value: string) =>
+  value
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/[’']/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+
 export const findProduct = (query: string): ProductModel | undefined => {
-  const normalized = query.trim().toLowerCase().replace(/[’']/g, "").replace(/\s+/g, " ");
-  if (!normalized) return undefined;
-  return PRODUCTS.find((product) =>
-    [product.name, product.shortName, ...product.aliases]
-      .map((value) => value.toLowerCase().replace(/[’']/g, ""))
-      .some((value) => normalized.includes(value) || value.includes(normalized)),
+  const normalized = normalizeLookup(query);
+  if (normalized.length < 2) return undefined;
+
+  const names = (product: ProductModel) =>
+    [product.name, product.shortName, ...product.aliases].map(normalizeLookup);
+
+  const exact = PRODUCTS.filter((product) => names(product).includes(normalized));
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) return undefined;
+
+  const paddedQuery = ` ${normalized} `;
+  const phraseMatches = PRODUCTS.filter((product) =>
+    names(product).some((name) => {
+      if (!name.includes(" ")) return false;
+      return paddedQuery.includes(` ${name} `);
+    }),
   );
+  return phraseMatches.length === 1 ? phraseMatches[0] : undefined;
 };

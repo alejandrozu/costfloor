@@ -7,27 +7,28 @@ import {
   evaluateNode,
   evaluateReplacement,
   ledgerRows,
-  scenarioRange,
   sensitivity,
 } from "./model/engine";
 import { DEFAULT_PRODUCT, findProduct, PRODUCTS } from "./model/fixtures";
+import {
+  DEFAULT_SCENARIO,
+  ELECTRICITY_PRICE_PER_MWH,
+  LOG_SLIDER,
+  RECURSION_DEPTH,
+  ROBOT_ENERGY_MULTIPLIER,
+  logSliderToValue,
+  quantizeLogValue,
+  valueToLogSlider,
+} from "./model/scenario";
 import type {
   CostNode,
   Evidence,
   Factor,
   ProductModel,
+  Range,
   ReplacementNode,
   Scenario,
 } from "./model/types";
-
-const DEFAULT_SCENARIO: Scenario = {
-  electricityPrice: 0.2,
-  robotEnergyMultiplier: 1,
-  maxDepth: 5,
-  retainScarcity: true,
-  retainMargin: false,
-  retainTax: false,
-};
 
 const FACTOR_LABELS: Record<Factor, string> = {
   labor: "Labor",
@@ -40,15 +41,33 @@ const FACTOR_LABELS: Record<Factor, string> = {
   unknown: "Depth residual",
 };
 
-const money = (value: number) =>
-  new Intl.NumberFormat("en-US", {
+const money = (value: number) => {
+  if (Math.abs(value) > 0 && Math.abs(value) < 0.1) {
+    return `${new Intl.NumberFormat("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 3,
+    }).format(value * 100)}¢`;
+  }
+  return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
     minimumFractionDigits: value >= 100 ? 0 : 2,
     maximumFractionDigits: value >= 100 ? 0 : 2,
   }).format(value);
+};
+
+const moneyRange = (value: Range) => `${money(value.low)}–${money(value.high)}`;
 
 const percent = (value: number) => `${Math.round(value * 100)}%`;
+
+const readableNumber = (value: number) =>
+  new Intl.NumberFormat("en-US", {
+    maximumSignificantDigits: 3,
+  }).format(value);
+
+const electricityLabel = (value: number) => `$${readableNumber(value)} / MWh`;
+
+const robotMultiplierLabel = (value: number) => `${readableNumber(value)}×`;
 
 function FactorKey({ factor }: { factor: Factor }) {
   return (
@@ -87,17 +106,23 @@ function ReplacementBranch({
   depth: number;
 }) {
   const value = evaluateReplacement(node, scenario, depth);
-  const children = node.rule.kind === "recurse" ? node.rule.children : [];
+  const isCutoff = depth >= scenario.maxDepth;
+  const children = !isCutoff && node.rule.kind === "recurse" ? node.rule.children : [];
   return (
-    <li className="replacement-branch">
+    <li className={`replacement-branch${isCutoff ? " replacement-cutoff" : ""}`}>
       <div className="replacement-row">
         <span className="replacement-line" aria-hidden="true" />
         <div>
           <span className="replacement-label">{node.label}</span>
           <span className="replacement-note">{node.note}</span>
+          {isCutoff && (
+            <span className="replacement-cutoff-note">
+              Depth {scenario.maxDepth} cutoff · bounded residual retained
+            </span>
+          )}
         </div>
         <FactorKey factor={value.cutoffCount ? "unknown" : node.factor} />
-        <span className="replacement-value">{scenarioRange(value.cost)}</span>
+        <span className="replacement-value">{moneyRange(value.cost)}</span>
       </div>
       {children.length > 0 && (
         <ol className="replacement-tree">
@@ -142,7 +167,7 @@ function CostBranch({
         <FactorKey factor={node.factor} />
         <span className="branch-current">{money(node.currentCost * priceScale)}</span>
         <span className="branch-arrow" aria-hidden="true">→</span>
-        <span className="branch-floor">{scenarioRange(automated.cost)}</span>
+        <span className="branch-floor">{moneyRange(automated.cost)}</span>
       </summary>
       <div className="branch-inspector">
         <div className="inspector-copy">
@@ -228,6 +253,12 @@ export default function CostFloorApp() {
     FACTORS.map((factor) => [factor, evaluation.breakdown[factor].base]),
   ) as Record<Factor, number>;
   const reduction = 1 - evaluation.cost.base / currentPrice;
+  const baseChangeLabel =
+    reduction > 0
+      ? `${percent(reduction)} LOWER`
+      : reduction < 0
+        ? `${percent(-reduction)} ABOVE`
+        : "NO CHANGE";
   const observedCost = rows
     .filter((row) =>
       row.evidenceIds.some((id) => model.evidence.find((entry) => entry.id === id)?.kind !== "assumption"),
@@ -235,6 +266,26 @@ export default function CostFloorApp() {
     .reduce((total, row) => total + row.currentCost, 0);
   const coverage = Math.min(1, observedCost / model.currentPrice);
   const drivers = sensitivity(model, scenario);
+  const comparisons = useMemo(
+    () =>
+      PRODUCTS.map((product) => {
+        const value = evaluateNode(product.root, scenario);
+        return {
+          product,
+          value,
+          retainedShare: {
+            low: value.cost.low / product.currentPrice,
+            base: value.cost.base / product.currentPrice,
+            high: value.cost.high / product.currentPrice,
+          },
+        };
+      }),
+    [scenario],
+  );
+  const comparisonCeiling = Math.max(
+    1,
+    Math.ceil(Math.max(...comparisons.map((item) => item.retainedShare.high)) * 4) / 4,
+  );
 
   const chooseProduct = (next: ProductModel) => {
     setModel(next);
@@ -260,9 +311,13 @@ export default function CostFloorApp() {
     setScenario((current) => ({ ...current, [key]: value }));
 
   const copySummary = async () => {
-    const summary = `${model.shortName}: ${money(currentPrice)} today → ${scenarioRange(
+    const changeSummary =
+      reduction >= 0
+        ? `${percent(reduction)} base reduction`
+        : `${percent(-reduction)} above the current input`;
+    const summary = `${model.shortName}: ${money(currentPrice)} today → ${moneyRange(
       evaluation.cost,
-    )} modeled automated resource floor (${percent(Math.max(0, reduction))} base reduction). CostFloor v0.1; scenario, not a price forecast.`;
+    )} modeled automated resource floor (${changeSummary}). CostFloor v0.1; scenario, not a price forecast.`;
     await navigator.clipboard.writeText(summary);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1600);
@@ -332,7 +387,7 @@ export default function CostFloorApp() {
                 id="product-search"
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="Try: tea, T-shirt, flour"
+                placeholder="Try: tea, laptop, car, boiled water"
                 autoComplete="off"
               />
               <span aria-hidden="true">⌕</span>
@@ -348,11 +403,11 @@ export default function CostFloorApp() {
                   <i>$</i>
                   <input
                     type="number"
-                    min="0.01"
-                    step="0.01"
+                    min="0.0001"
+                    step="0.0001"
                     value={currentPrice}
-                    onChange={(event) => setCurrentPrice(Math.max(0.01, Number(event.target.value)))}
-                    aria-label="Current retail price in dollars"
+                    onChange={(event) => setCurrentPrice(Math.max(0.0001, Number(event.target.value)))}
+                    aria-label="Current input price in dollars"
                   />
                 </span>
               </label>
@@ -380,7 +435,9 @@ export default function CostFloorApp() {
               audited fixture above; the prototype never invents a decomposition silently.
             </div>
           ) : (
-            <p className="model-disclaimer">Three auditable fixtures · ranges, not forecasts</p>
+            <p className="model-disclaimer">
+              {PRODUCTS.length} auditable fixtures · ranges, not forecasts
+            </p>
           )}
         </aside>
       </section>
@@ -394,18 +451,20 @@ export default function CostFloorApp() {
           </div>
         </div>
         <div className="result-metric">
-          <strong>{scenarioRange(evaluation.cost)}</strong>
-          <span>{money(currentPrice)} current input · {money(evaluation.cost.base)} base case</span>
+          <strong>{moneyRange(evaluation.cost)}</strong>
+          <span>
+            {money(currentPrice)} input · {money(evaluation.cost.base)} base · {electricityLabel(scenario.electricityPricePerMWh)} · robot {robotMultiplierLabel(scenario.robotEnergyMultiplier)} · depth {scenario.maxDepth}
+          </span>
         </div>
         <div className="compression">
           <div className="compression-label">
-            <span>BASE COST COMPRESSION</span>
-            <strong>{reduction > 0 ? percent(reduction) : "NO DROP"}</strong>
+            <span>BASE FLOOR VS CURRENT</span>
+            <strong>{baseChangeLabel}</strong>
           </div>
           <div className="compression-track" aria-hidden="true">
             <span style={{ width: `${Math.min(100, Math.max(0, reduction * 100))}%` }} />
           </div>
-          <p>Technological boundary scenario—not a prediction of what sellers will charge.</p>
+          <p>Base compares the evaluated floor with the editable input; low and high endpoints propagate independently.</p>
         </div>
       </section>
 
@@ -439,7 +498,7 @@ export default function CostFloorApp() {
         <div className="result-facts">
           <div>
             <span>SCENARIO RANGE</span>
-            <strong>{scenarioRange(evaluation.cost)}</strong>
+            <strong>{moneyRange(evaluation.cost)}</strong>
             <p>Interval arithmetic across low/base/high inputs</p>
           </div>
           <div>
@@ -458,10 +517,10 @@ export default function CostFloorApp() {
       <section className="scenario-section" aria-labelledby="scenario-title">
         <div className="scenario-copy">
           <p className="section-index">03 / ASSUMPTIONS LAB</p>
-          <h2 id="scenario-title">Change the boundary.<br />Watch the floor move.</h2>
+          <h2 id="scenario-title">Perturb the scenario.<br />Re-evaluate every branch.</h2>
           <p>
-            These controls are part of the answer. The prototype exposes uncertainty instead of
-            hiding it behind a single authoritative-looking number.
+            Logarithmic energy controls span three orders of magnitude. Depth and boundary
+            switches are evaluated by the same typed graph used in the ledger and comparison.
           </p>
           <button className="text-button" type="button" onClick={() => setScenario(DEFAULT_SCENARIO)}>
             Reset baseline ↺
@@ -469,64 +528,116 @@ export default function CostFloorApp() {
         </div>
         <div className="scenario-controls">
           <label className="range-control">
-            <span><b>Electricity price</b><strong>${scenario.electricityPrice.toFixed(2)} / kWh</strong></span>
+            <span>
+              <b>Electricity price</b>
+              <strong>{electricityLabel(scenario.electricityPricePerMWh)}</strong>
+            </span>
             <input
               type="range"
-              min="0.08"
-              max="0.6"
-              step="0.01"
-              value={scenario.electricityPrice}
-              onChange={(event) => setScenarioValue("electricityPrice", Number(event.target.value))}
+              min={LOG_SLIDER.min}
+              max={LOG_SLIDER.max}
+              step={LOG_SLIDER.step}
+              value={valueToLogSlider(scenario.electricityPricePerMWh, ELECTRICITY_PRICE_PER_MWH)}
+              aria-label="Electricity price"
+              aria-valuetext={`${electricityLabel(scenario.electricityPricePerMWh)} on a logarithmic scale`}
+              onChange={(event) =>
+                setScenarioValue(
+                  "electricityPricePerMWh",
+                  quantizeLogValue(
+                    logSliderToValue(Number(event.target.value), ELECTRICITY_PRICE_PER_MWH),
+                    ELECTRICITY_PRICE_PER_MWH,
+                  ),
+                )
+              }
             />
-            <small>Applies to direct process energy and all recursively derived machine energy.</small>
+            <div className="range-scale" aria-hidden="true">
+              <span>$1</span><span>LOG · 0.05 DECADE / STEP</span><span>$1,000</span>
+            </div>
+            <small>
+              Multiplies every direct and derived kWh after converting $/MWh to $/kWh.
+              Each step changes the value by about 12.2%.
+            </small>
           </label>
           <label className="range-control">
-            <span><b>Robot task energy</b><strong>{scenario.robotEnergyMultiplier.toFixed(2)}×</strong></span>
+            <span>
+              <b>Robot task energy</b>
+              <strong>{robotMultiplierLabel(scenario.robotEnergyMultiplier)}</strong>
+            </span>
             <input
               type="range"
-              min="0.5"
-              max="2"
-              step="0.05"
-              value={scenario.robotEnergyMultiplier}
-              onChange={(event) => setScenarioValue("robotEnergyMultiplier", Number(event.target.value))}
+              min={LOG_SLIDER.min}
+              max={LOG_SLIDER.max}
+              step={LOG_SLIDER.step}
+              value={valueToLogSlider(scenario.robotEnergyMultiplier, ROBOT_ENERGY_MULTIPLIER)}
+              aria-label="Robot task energy multiplier"
+              aria-valuetext={`${robotMultiplierLabel(scenario.robotEnergyMultiplier)} on a logarithmic scale`}
+              onChange={(event) =>
+                setScenarioValue(
+                  "robotEnergyMultiplier",
+                  quantizeLogValue(
+                    logSliderToValue(Number(event.target.value), ROBOT_ENERGY_MULTIPLIER),
+                    ROBOT_ENERGY_MULTIPLIER,
+                  ),
+                )
+              }
             />
-            <small>Scales only the energy created by automation replacements.</small>
+            <div className="range-scale" aria-hidden="true">
+              <span>0.01×</span><span>LOG · 0.05 DECADE / STEP</span><span>10×</span>
+            </div>
+            <small>
+              Scales task-runtime and AI energy inside labor replacements—not direct process,
+              fabrication, or maintenance energy.
+            </small>
           </label>
           <label className="range-control">
             <span><b>Recursion depth</b><strong>{scenario.maxDepth} levels</strong></span>
             <input
               type="range"
-              min="3"
-              max="6"
+              min={RECURSION_DEPTH.min}
+              max={RECURSION_DEPTH.max}
               step="1"
               value={scenario.maxDepth}
+              aria-label="Maximum recursion depth"
+              aria-valuetext={`${scenario.maxDepth} levels`}
               onChange={(event) => setScenarioValue("maxDepth", Number(event.target.value))}
             />
-            <small>Deeper traces expose more embodied inputs; cutoffs become visible residuals.</small>
+            <div className="range-scale" aria-hidden="true">
+              <span>{RECURSION_DEPTH.min}</span><span>INTEGER CUTOFF</span><span>{RECURSION_DEPTH.max}</span>
+            </div>
+            <small>
+              A replacement node at or beyond the cutoff becomes a bounded residual. A finite
+              trace can terminate before the selected limit.
+            </small>
           </label>
           <div className="toggle-stack">
-            <label className="switch-row">
+            <label className="switch-row" htmlFor="retain-scarcity">
               <span><b>Retain land & material scarcity</b><small>Keep ownership and scarcity residuals separate from energy.</small></span>
               <input
+                id="retain-scarcity"
                 type="checkbox"
+                aria-label="Retain land and material scarcity"
                 checked={scenario.retainScarcity}
                 onChange={(event) => setScenarioValue("retainScarcity", event.target.checked)}
               />
               <i aria-hidden="true" />
             </label>
-            <label className="switch-row">
-              <span><b>Retain current margin</b><small>Treat today's channel and brand margin as persistent.</small></span>
+            <label className="switch-row" htmlFor="retain-margin">
+              <span><b>Retain current margin</b><small>Treat today&apos;s channel and brand margin as persistent.</small></span>
               <input
+                id="retain-margin"
                 type="checkbox"
+                aria-label="Retain current margin"
                 checked={scenario.retainMargin}
                 onChange={(event) => setScenarioValue("retainMargin", event.target.checked)}
               />
               <i aria-hidden="true" />
             </label>
-            <label className="switch-row">
+            <label className="switch-row" htmlFor="retain-tax">
               <span><b>Retain tax & policy costs</b><small>Keep current institutional charges in the scenario.</small></span>
               <input
+                id="retain-tax"
                 type="checkbox"
+                aria-label="Retain tax and policy costs"
                 checked={scenario.retainTax}
                 onChange={(event) => setScenarioValue("retainTax", event.target.checked)}
               />
@@ -540,10 +651,13 @@ export default function CostFloorApp() {
             <div key={driver.label}>
               <span>0{index + 1}</span>
               <b>{driver.label}</b>
-              <strong>±{money(driver.delta)}</strong>
+              <strong>Δ {money(driver.delta)}</strong>
             </div>
           ))}
-          <small>Absolute change in base result under the documented perturbation.</small>
+          <small>
+            Absolute base-case change for the stated one-sided perturbation; not an error bar or
+            confidence interval.
+          </small>
         </aside>
       </section>
 
@@ -603,7 +717,7 @@ export default function CostFloorApp() {
                   <td><FactorKey factor={row.factor} /></td>
                   <td>{money(row.currentCost * priceScale)}</td>
                   <td>{row.treatment}</td>
-                  <td>{scenarioRange(row.automated.cost)}</td>
+                  <td>{moneyRange(row.automated.cost)}</td>
                   <td><EvidenceBadges ids={row.evidenceIds} evidence={model.evidence} /></td>
                 </tr>
               ))}
@@ -613,7 +727,7 @@ export default function CostFloorApp() {
                 <td colSpan={2}>RECONCILED TOTAL</td>
                 <td>{money(currentPrice)}</td>
                 <td>→</td>
-                <td>{scenarioRange(evaluation.cost)}</td>
+                <td>{moneyRange(evaluation.cost)}</td>
                 <td>{evaluation.cutoffCount} residuals</td>
               </tr>
             </tfoot>
@@ -625,38 +739,85 @@ export default function CostFloorApp() {
         <div className="section-intro">
           <p className="section-index">06 / COMPARISON</p>
           <div>
-            <h2 id="comparison-title">Abundance arrives unevenly.</h2>
-            <p>Labor-sensitive goods compress differently from already mechanized staples.</p>
+            <h2 id="comparison-title">Compare what remains.</h2>
+            <p>
+              Each fixture&apos;s current price is normalized to 100%. The band spans low to high and
+              the tick marks base; either can cross today&apos;s-price line.
+            </p>
           </div>
         </div>
         <div className="comparison-list">
-          {PRODUCTS.map((product, index) => {
-            const value = evaluateNode(product.root, scenario);
-            const drop = Math.max(0, 1 - value.cost.base / product.currentPrice);
-            return (
-              <button key={product.id} type="button" onClick={() => chooseProduct(product)}>
-                <span className="comparison-index">0{index + 1}</span>
-                <span className="comparison-name"><b>{product.shortName}</b><small>{product.unit}</small></span>
-                <span className="comparison-prices"><s>{money(product.currentPrice)}</s><b>{money(value.cost.base)}</b></span>
-                <span className="comparison-bar"><i style={{ width: `${drop * 100}%` }} /></span>
-                <strong>{percent(drop)} <i>↓</i></strong>
-              </button>
-            );
-          })}
+          <div className="comparison-axis" aria-hidden="true">
+            <span>GOOD</span><span>CURRENT / BASE FLOOR</span><span>LOW—BASE—HIGH SHARE · TODAY = 100%</span><span>SHARE</span>
+          </div>
+          {comparisons.map(({ product, value, retainedShare }, index) => (
+            <button
+              key={product.id}
+              type="button"
+              className={product.id === model.id ? "active" : ""}
+              aria-pressed={product.id === model.id}
+              onClick={() => chooseProduct(product)}
+            >
+              <span className="comparison-index">{String(index + 1).padStart(2, "0")}</span>
+              <span className="comparison-name">
+                <b>{product.shortName}</b><small>{product.unit}</small>
+              </span>
+              <span className="comparison-prices">
+                <span>{money(product.currentPrice)} current</span>
+                <b>{money(value.cost.base)} floor</b>
+              </span>
+              <span
+                className="comparison-bar"
+                role="img"
+                aria-label={`${percent(retainedShare.low)} to ${percent(retainedShare.high)} retained; ${percent(retainedShare.base)} base case; current price is 100%`}
+              >
+                <i
+                  style={{
+                    left: `${(retainedShare.low / comparisonCeiling) * 100}%`,
+                    width: `${((retainedShare.high - retainedShare.low) / comparisonCeiling) * 100}%`,
+                  }}
+                />
+                <b style={{ left: `${(retainedShare.base / comparisonCeiling) * 100}%` }} />
+                <em style={{ left: `${(1 / comparisonCeiling) * 100}%` }} />
+              </span>
+              <strong>
+                {percent(retainedShare.base)} <i>{percent(retainedShare.low)}–{percent(retainedShare.high)}</i>
+              </strong>
+            </button>
+          ))}
         </div>
       </section>
 
       <section className="method-section" id="method" aria-labelledby="method-title">
         <div className="method-statement">
           <p className="section-index">07 / METHOD</p>
-          <h2 id="method-title">Not a prophecy.<br />A contestable accounting system.</h2>
+          <h2 id="method-title">A typed accounting graph.<br />Not a price forecast.</h2>
         </div>
         <div className="method-steps">
-          <article><span>01</span><div><h3>Reconcile today</h3><p>Normalize one functional unit and make every current dollar land in a visible branch.</p></div></article>
-          <article><span>02</span><div><h3>Replace labor</h3><p>Convert a task into robot operating energy plus its allocated embodied capital.</p></div></article>
-          <article><span>03</span><div><h3>Expand capital</h3><p>Open machinery into materials, fabrication energy, maintenance, and deeper automation.</p></div></article>
-          <article><span>04</span><div><h3>Stop honestly</h3><p>At the selected depth, retain a bounded residual. Never turn uncertainty into zero.</p></div></article>
-          <article><span>05</span><div><h3>Keep scarcity separate</h3><p>Land, matter, market power, tax, and ownership are scenario boundaries—not joules.</p></div></article>
+          <article>
+            <span>01</span>
+            <div><h3>Reconcile one functional unit</h3><p>The current-cost children must sum to the fixture&apos;s retail price before any transformation is evaluated.</p></div>
+          </article>
+          <article>
+            <span>02</span>
+            <div><h3>Replace task labor</h3><p><code>task kWh × robot multiplier × ($/MWh ÷ 1,000)</code> prices task-runtime and AI energy; embodied machine inputs are added separately.</p></div>
+          </article>
+          <article>
+            <span>03</span>
+            <div><h3>Expand productive capital</h3><p>Machine price is replaced—not double-counted—with allocated materials, fabrication energy, tooling wear, and automated service branches.</p></div>
+          </article>
+          <article>
+            <span>04</span>
+            <div><h3>Keep physical and institutional boundaries explicit</h3><p>Electricity prices every kWh. The robot multiplier touches only tagged task-runtime energy. Scarcity, margin, and tax remain independent switches.</p></div>
+          </article>
+          <article>
+            <span>05</span>
+            <div><h3>Terminate with a bound</h3><p>A replacement node at <code>depth ≥ maximum depth</code>, or a detected cycle, becomes a low/base/high residual. Terminal physics may end a trace earlier.</p></div>
+          </article>
+          <article>
+            <span>06</span>
+            <div><h3>Propagate intervals, not probabilities</h3><p>Low, base, and high endpoints add through the graph. The range is a contestable scenario envelope—not a confidence interval or seller-price prediction.</p></div>
+          </article>
         </div>
       </section>
 

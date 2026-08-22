@@ -25,16 +25,27 @@ export type Evidence = {
   note: string;
 };
 
+export type ReplacementEnergy = {
+  kWh: Range;
+  scaleWithRobot: boolean;
+};
+
+export type PhysicalDepthFallback = {
+  energy: ReplacementEnergy[];
+  scarcityUsd: Range;
+  fixedUsd: Range;
+};
+
 export type ReplacementNode = {
   id: string;
   label: string;
   factor: Factor;
   note: string;
   evidenceIds: string[];
-  fallbackUsd: Range;
+  depthFallback: PhysicalDepthFallback;
   rule:
     | { kind: "recurse"; children: ReplacementNode[] }
-    | { kind: "energy"; kWh: Range }
+    | { kind: "energy"; kWh: Range; scaleWithRobot: boolean }
     | { kind: "scarcity"; usd: Range }
     | { kind: "fixed"; usd: Range };
 };
@@ -71,7 +82,7 @@ export type ProductModel = {
 };
 
 export type Scenario = {
-  electricityPrice: number;
+  electricityPricePerMWh: number;
   robotEnergyMultiplier: number;
   maxDepth: number;
   retainScarcity: boolean;

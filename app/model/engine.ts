@@ -6,9 +6,16 @@ import type {
   LedgerRow,
   ProductModel,
   Range,
+  ReplacementEnergy,
   ReplacementNode,
   Scenario,
 } from "./types";
+import {
+  ELECTRICITY_PRICE_PER_MWH,
+  RECURSION_DEPTH,
+  ROBOT_ENERGY_MULTIPLIER,
+  electricityPricePerKWh,
+} from "./scenario";
 
 export const FACTORS: Factor[] = [
   "labor",
@@ -74,13 +81,48 @@ const combine = (items: Evaluation[]): Evaluation =>
     { cost: zeroRange(), breakdown: emptyBreakdown(), cutoffCount: 0, formulas: [] },
   );
 
-const depthFallback = (node: ReplacementNode): Evaluation =>
-  result(
-    node.fallbackUsd,
-    "unknown",
-    `${node.label}: retained as a bounded residual at the selected depth`,
-    1,
+const evaluateReplacementEnergy = (
+  energy: ReplacementEnergy,
+  scenario: Scenario,
+  label: string,
+): Evaluation => {
+  const kWh = energy.scaleWithRobot
+    ? scaleRange(energy.kWh, scenario.robotEnergyMultiplier)
+    : energy.kWh;
+  const pricePerKWh = electricityPricePerKWh(scenario.electricityPricePerMWh);
+  const cost = scaleRange(kWh, pricePerKWh);
+  return result(
+    cost,
+    "energy",
+    energy.scaleWithRobot
+      ? `${label}: kWh × robot-energy factor × $${scenario.electricityPricePerMWh.toFixed(0)}/MWh ÷ 1,000`
+      : `${label}: physical kWh × $${scenario.electricityPricePerMWh.toFixed(0)}/MWh ÷ 1,000`,
   );
+};
+
+const depthFallback = (node: ReplacementNode, scenario: Scenario, reason: string): Evaluation => {
+  const energy = node.depthFallback.energy.map((item) =>
+    evaluateReplacementEnergy(item, scenario, `${node.label} fallback energy`),
+  );
+  const scarcity = result(
+    scenario.retainScarcity ? node.depthFallback.scarcityUsd : zeroRange(),
+    node.factor,
+    scenario.retainScarcity
+      ? `${node.label}: physical fallback scarcity retained`
+      : `${node.label}: physical fallback scarcity excluded`,
+  );
+  const fixed = result(
+    node.depthFallback.fixedUsd,
+    node.factor,
+    `${node.label}: physical fallback wear retained`,
+  );
+  const evaluation = combine([...energy, scarcity, fixed]);
+  return {
+    ...evaluation,
+    cutoffCount: evaluation.cutoffCount + 1,
+    formulas: [`${node.label}: ${reason}; physical depth fallback evaluated`, ...evaluation.formulas],
+  };
+};
 
 export const evaluateReplacement = (
   node: ReplacementNode,
@@ -89,9 +131,11 @@ export const evaluateReplacement = (
   path: string[] = [],
 ): Evaluation => {
   if (path.includes(node.id)) {
-    return result(node.fallbackUsd, "unknown", `${node.label}: cycle blocked`, 1);
+    return depthFallback(node, scenario, "cycle blocked");
   }
-  if (depth >= scenario.maxDepth) return depthFallback(node);
+  if (depth >= scenario.maxDepth) {
+    return depthFallback(node, scenario, "selected recursion depth reached");
+  }
 
   const nextPath = [...path, node.id];
   switch (node.rule.kind) {
@@ -102,12 +146,10 @@ export const evaluateReplacement = (
         ),
       );
     case "energy": {
-      const kWh = scaleRange(node.rule.kWh, scenario.robotEnergyMultiplier);
-      const cost = scaleRange(kWh, scenario.electricityPrice);
-      return result(
-        cost,
-        "energy",
-        `${node.label}: kWh × robot-energy factor × $${scenario.electricityPrice.toFixed(2)}/kWh`,
+      return evaluateReplacementEnergy(
+        { kWh: node.rule.kWh, scaleWithRobot: node.rule.scaleWithRobot },
+        scenario,
+        node.label,
       );
     }
     case "scarcity": {
@@ -159,15 +201,21 @@ export const evaluateNode = (
       return evaluateReplacement(node.rule.replacement, scenario, depth + 1, nextPath);
     case "energy":
       return result(
-        scaleRange(node.rule.kWh, scenario.electricityPrice),
+        scaleRange(
+          node.rule.kWh,
+          electricityPricePerKWh(scenario.electricityPricePerMWh),
+        ),
         "energy",
-        `${node.label}: physical kWh × $${scenario.electricityPrice.toFixed(2)}/kWh`,
+        `${node.label}: physical kWh × $${scenario.electricityPricePerMWh.toFixed(0)}/MWh ÷ 1,000`,
       );
     case "resource": {
       const energy = result(
-        scaleRange(node.rule.processKWh, scenario.electricityPrice),
+        scaleRange(
+          node.rule.processKWh,
+          electricityPricePerKWh(scenario.electricityPricePerMWh),
+        ),
         "energy",
-        `${node.label}: extraction and processing kWh × electricity price`,
+        `${node.label}: extraction and processing kWh × $/MWh ÷ 1,000`,
       );
       const scarcity = result(
         scenario.retainScarcity ? node.rule.scarcityUsd : zeroRange(),
@@ -278,22 +326,42 @@ export const scenarioRange = (value: Range) =>
 
 export const sensitivity = (model: ProductModel, scenario: Scenario) => {
   const base = evaluateNode(model.root, scenario).cost.base;
+  const electricityPricePerMWh = Math.min(
+    ELECTRICITY_PRICE_PER_MWH.max,
+    scenario.electricityPricePerMWh * 1.1,
+  );
+  const robotEnergyMultiplier = Math.min(
+    ROBOT_ENERGY_MULTIPLIER.max,
+    scenario.robotEnergyMultiplier * 1.1,
+  );
+  const maxDepth = Math.max(RECURSION_DEPTH.min, scenario.maxDepth - 1);
   const variants = [
     {
-      label: "Electricity price",
-      scenario: { ...scenario, electricityPrice: scenario.electricityPrice * 1.1 },
+      label:
+        electricityPricePerMWh === scenario.electricityPricePerMWh
+          ? "Electricity price (at maximum)"
+          : "Electricity price ×1.10",
+      scenario: { ...scenario, electricityPricePerMWh },
     },
     {
-      label: "Robot task energy",
-      scenario: { ...scenario, robotEnergyMultiplier: scenario.robotEnergyMultiplier * 1.1 },
+      label:
+        robotEnergyMultiplier === scenario.robotEnergyMultiplier
+          ? "Robot task energy (at maximum)"
+          : "Robot task energy ×1.10",
+      scenario: { ...scenario, robotEnergyMultiplier },
     },
     {
-      label: "Scarcity boundary",
+      label: scenario.retainScarcity
+        ? "Scarcity boundary: on → off"
+        : "Scarcity boundary: off → on",
       scenario: { ...scenario, retainScarcity: !scenario.retainScarcity },
     },
     {
-      label: "Recursion depth",
-      scenario: { ...scenario, maxDepth: Math.max(2, scenario.maxDepth - 1) },
+      label:
+        maxDepth === scenario.maxDepth
+          ? `Recursion depth ${scenario.maxDepth} (at minimum)`
+          : `Recursion depth ${scenario.maxDepth} → ${maxDepth}`,
+      scenario: { ...scenario, maxDepth },
     },
   ];
   return variants
